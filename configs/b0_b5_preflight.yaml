@@ -1,0 +1,20 @@
+# Real ImageNet B5, small artificial inputs; validates implementation, not accuracy.
+extends: b0_smoke.yaml
+paths:
+  data_root: tmp/synthetic/data
+  run_dir: tmp/b5-preflight
+  cache_dir: cache/huggingface
+model:
+  local_files_only: true
+data:
+  crop_hw: [64, 64]
+  scale_range: [1.0, 1.0]
+  eval_hw: [64, 96]
+train:
+  device: cuda
+  precision: auto
+  batch_size: 1
+  max_steps: 2
+  warmup_steps: 1
+  eval_every: 2
+  checkpoint_every: 2

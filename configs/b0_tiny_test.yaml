@@ -1,0 +1,19 @@
+extends: b0_smoke.yaml
+paths:
+  data_root: tmp/synthetic/data
+  run_dir: tmp/synthetic/run
+model:
+  variant: tiny_test
+  pretrained: false
+data:
+  crop_hw: [32, 32]
+  scale_range: [1.0, 1.0]
+  eval_hw: [32, 64]
+train:
+  device: cpu
+  cpu_threads: 2
+  precision: fp32
+  max_steps: 4
+  warmup_steps: 1
+  eval_every: 2
+  checkpoint_every: 2

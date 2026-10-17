@@ -1,0 +1,12 @@
+extends: b0_source_only.yaml
+run:
+  kind: smoke
+  budget_note: "20-step pipeline check; not a research baseline"
+paths:
+  run_dir: runs/b0-smoke
+train:
+  max_steps: 20
+  warmup_steps: 2
+  log_every: 1
+  eval_every: 10
+  checkpoint_every: 10

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crisp-da"
+version = "0.1.0"
+description = "Source-only GTA5 to Cityscapes baseline for CRISP-DA"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.6", "transformers==4.57.6", "numpy>=1.26",
+  "Pillow>=10", "PyYAML>=6", "huggingface-hub>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+notebook = ["marimo>=0.14"]
+
+[project.scripts]
+crisp-da = "crisp_da.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

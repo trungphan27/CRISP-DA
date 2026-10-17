@@ -1,0 +1,10 @@
+{
+  "repo_id": "nvidia/mit-b5",
+  "revision": "40357155205b036cf11b61f132d53d2f8861f170",
+  "pretraining_dataset": "ImageNet-1k",
+  "files_sha256": {
+    "config.json": "a78b8803dc51bd7c2daede736e2ca03446255dac6be963f56e12aa07fbab611c",
+    "preprocessor_config.json": "d96ab2cb112985c19d5ea32f1d1f2369104fc78b1379f5ce26e33ca8646202a7",
+    "pytorch_model.bin": "a389c0a604458fa205446fd08a2c01b74e6591a5da3e77de668c6ca5cbf75356"
+  }
+}
