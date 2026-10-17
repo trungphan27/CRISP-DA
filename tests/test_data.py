@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from crisp_da.data.archive import extract_zip
+from crisp_da.data.inspect import inspect_manifest
 from crisp_da.data.manifest import build_manifests, load_manifest, resolve_data_path
 from crisp_da.data.mapping import RAW_IDS, map_labels
 from crisp_da.data.sampler import StatefulBatchSampler
@@ -26,6 +27,34 @@ def test_mapping_and_encoding():
         map_labels(np.zeros((3,3,3),dtype=np.uint8),"raw_ids")
     with pytest.raises(ValueError):
         map_labels(np.array([[120]]),"raw_ids","error")
+
+
+def test_gta_extra_id_is_ignored_only_for_gta():
+    raw = np.array([[7, 33, 34, 255]], dtype=np.uint8)
+    assert map_labels(raw, "raw_ids", "error", dataset="gta").tolist() == [[0, 18, 255, 255]]
+    for dataset in (None, "cityscapes"):
+        with pytest.raises(ValueError, match="Unknown raw IDs"):
+            map_labels(raw, "raw_ids", "error", dataset=dataset)
+    with pytest.raises(ValueError, match="Unknown raw IDs"):
+        map_labels(np.array([[120]]), "raw_ids", "error", dataset="gta")
+    with pytest.raises(ValueError, match="Invalid train IDs"):
+        map_labels(raw, "train_ids", "error", dataset="gta")
+
+
+def test_gta34_manifest_inspection_and_loader(fixture_config):
+    root = Path(fixture_config["paths"]["data_root"])
+    for path in (root/"gta/labels").glob("*.png"):
+        with Image.open(path) as image:
+            shape = np.asarray(image).shape
+        Image.fromarray(np.full(shape, 34, dtype=np.uint8)).save(path)
+    report = build_manifests(root, root/"manifests", "raw_ids")
+    assert report["gta_extra_raw_ignore_ids"] == [34]
+    assert sum(report["source_class_pixels"]) == 0
+    inspection = inspect_manifest(root, root/"manifests/source_train.jsonl", root/"inspection")
+    assert inspection["raw_values_observed"] == [34]
+    assert inspection["ignore_pixels"] > 0
+    datasets, _ = make_datasets(fixture_config)
+    assert (datasets["source_train"][0]["label"] == 255).all()
 
 
 def test_joint_crop_flip_and_original_eval_gt():

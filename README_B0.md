@@ -1,5 +1,15 @@
 # CRISP-DA B0 — hướng dẫn chạy mã nguồn
 
+Mapping update (2026-10-17): raw ID `34` observed in GTA masks is mapped to
+`255` (ignored), since it is outside the benchmark's 19 raw IDs. This is
+GTA-specific and applies to manifest validation, inspection and training.
+Cityscapes validation and rejection of other unexpected IDs remain strict.
+The manifest report records `gta_extra_raw_ignore_ids: [34]`.
+This follows the exclusion policy in the
+[AdaptSegNet GTA loader](https://github.com/wasidennis/AdaptSegNet/blob/master/dataset/gta5_dataset.py);
+it does not assert a semantic class name for ID 34. Inspect real overlays
+before marking the dataset mapping as verified.
+
 Mã nguồn thực hiện **source-only GTA5 → Cityscapes**, theo mục 4 và 15 của
 [kế hoạch](CRISP_DA_IMPLEMENTATION_PLAN.md). B0 có CLI train/evaluate, dữ liệu manifest,
 mapping, kiểm tra ảnh–nhãn, resume và notebook launcher. Kết quả trên dữ liệu thật

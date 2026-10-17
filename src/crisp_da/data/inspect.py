@@ -20,7 +20,7 @@ def inspect_manifest(root, manifest, output, limit=None):
         with Image.open(resolve_data_path(root,row["label_path"])) as f:
             raw = np.array(f)
         raw_values.update(np.unique(raw).tolist())
-        labels = map_labels(raw,row["label_encoding"],"error")
+        labels = map_labels(raw,row["label_encoding"],"error",dataset=row["dataset"])
         if labels.shape != rgb.shape[:2] or labels.shape != (row["height"],row["width"]):
             raise ValueError(f"Invalid dimensions: {row['sample_id']}")
         histogram += np.bincount(labels[labels != 255],minlength=19)

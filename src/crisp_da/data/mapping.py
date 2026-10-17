@@ -20,7 +20,7 @@ COLORS = np.array([
 ], dtype=np.uint8)
 
 
-def map_labels(mask, encoding, unknown_policy="ignore"):
+def map_labels(mask, encoding, unknown_policy="ignore", *, dataset=None):
     mask = np.asarray(mask)
     if mask.ndim != 2 or not np.issubdtype(mask.dtype, np.integer):
         raise ValueError("Expected a 2D integer ID mask, not an RGB/color mask")
@@ -32,8 +32,12 @@ def map_labels(mask, encoding, unknown_policy="ignore"):
         return mask.astype(np.uint8, copy=True)
     if encoding != "raw_ids":
         raise ValueError("label_encoding must be raw_ids or train_ids")
-    # Official void IDs are valid raw annotations and map to ignore.
-    unknown = ~np.isin(mask, [*range(34), -1, 255])
+    # GTA ID 34 was observed in the real source masks. It is outside the
+    # 19-class benchmark mapping, so exclude it from supervision (255), as
+    # AdaptSegNet does for IDs outside RAW_TO_TRAIN. Do not assign it a class
+    # name or relax Cityscapes validation. Other unexpected IDs still fail.
+    extra_ignore_ids = [34] if dataset == "gta" else []
+    unknown = ~np.isin(mask, [*range(34), -1, 255, *extra_ignore_ids])
     if unknown.any() and unknown_policy == "error":
         raise ValueError(f"Unknown raw IDs: {np.unique(mask[unknown]).tolist()}")
     out = np.full(mask.shape, 255, dtype=np.uint8)

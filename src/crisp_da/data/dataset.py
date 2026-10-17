@@ -25,7 +25,8 @@ class ManifestDataset(Dataset):
         with Image.open(resolve_data_path(self.root, row["image_path"])) as im:
             image = im.convert("RGB")
         with Image.open(resolve_data_path(self.root, row["label_path"])) as im:
-            mask = map_labels(np.asarray(im), self.encoding, self.unknown_policy)
+            mask = map_labels(np.asarray(im), self.encoding, self.unknown_policy,
+                              dataset=row["dataset"])
         if image.size != (row["width"], row["height"]) or mask.shape != (image.height, image.width):
             raise ValueError(f"Manifest dimensions or image/label pair changed: {row['sample_id']}")
         digest = hashlib.sha256(f"{self.seed}/{epoch}/{row['sample_id']}".encode()).digest()

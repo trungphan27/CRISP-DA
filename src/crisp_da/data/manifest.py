@@ -70,7 +70,7 @@ def verify_pair(root, image_path, label_path, encoding, dataset, sample_id):
             label.load()
             if label.size != (width, height):
                 raise ValueError(f"Image/label size mismatch: {sample_id}")
-            mask = map_labels(np.asarray(label), encoding, "error")
+            mask = map_labels(np.asarray(label), encoding, "error", dataset=dataset)
         histogram = np.bincount(mask[mask != 255], minlength=19)
         row.update(label_path=label_path.relative_to(root).as_posix(), label_encoding=encoding)
     return row, histogram
@@ -115,6 +115,7 @@ def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fra
                                  index_files(root/"cityscapes/gtFine/val", city_suffix), city_encoding, "cityscapes")
     report = {"seed": seed, "source_split_policy": "seeded image-level random split; no scene grouping metadata",
               "mapping": RAW_TO_TRAIN, "gta_encoding": gta_encoding, "city_encoding": city_encoding,
+              "gta_extra_raw_ignore_ids": [34],
               "class_mapping":[{"class_name":name,"raw_id":raw,"train_id":train}
                                for train,(name,raw) in enumerate(zip(CLASS_NAMES,RAW_IDS))],
               "source_class_pixels": gta_hist, "city_val_class_pixels": city_hist, "manifests": {}}
