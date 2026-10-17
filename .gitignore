@@ -7,11 +7,11 @@ pytest-cache-files-*/
 .env
 .env.*
 !.env.example
-data/
-cache/
-runs/
-artifacts/
-tmp/
+/data/
+/cache/
+/runs/
+/artifacts/
+/tmp/
 %SystemDrive%/
 *.zip
 *.pt
