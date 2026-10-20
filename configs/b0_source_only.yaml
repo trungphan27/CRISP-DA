@@ -41,7 +41,8 @@ train:
   min_lr: 0.0
   clip_grad_norm: 1.0
   log_every: 20
-  eval_every: 1000
+  eval_every: 0
+  eval_every_epoch: true
   checkpoint_every: 1000
   max_skipped_updates: 100
   save_best_target_val: false

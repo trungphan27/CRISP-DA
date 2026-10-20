@@ -9,6 +9,8 @@ from PIL import Image
 from crisp_da.data.mapping import CLASS_NAMES, RAW_IDS, RAW_TO_TRAIN, map_labels
 from crisp_da.utils import sha256, write_json
 
+HALF_SIZE_RGB_POLICY = "upsample_half_size_rgb_to_label_bilinear"
+
 
 def resolve_data_path(root, relative):
     root = Path(root).resolve()
@@ -19,6 +21,29 @@ def resolve_data_path(root, relative):
     if not result.is_relative_to(root):
         raise ValueError(f"Path leaves DATA_ROOT: {relative}")
     return result
+
+
+def read_rgb(root, row):
+    """Apply only the RGB alignment explicitly recorded during manifest creation."""
+    path = resolve_data_path(root, row["image_path"])
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+    alignment = row.get("image_alignment")
+    if alignment:
+        original = alignment["original_hw"]
+        target = alignment["target_hw"]
+        if (row["dataset"] != "gta" or alignment["policy"] != HALF_SIZE_RGB_POLICY
+                or original != [rgb.height, rgb.width]
+                or target != [row["height"], row["width"]]
+                or target != [2*rgb.height, 2*rgb.width]):
+            raise ValueError(f"Invalid/changed RGB alignment: {row['sample_id']}")
+        if (sha256(path) != alignment["original_image_sha256"]
+                or sha256(resolve_data_path(root, row["label_path"])) != alignment["label_sha256"]):
+            raise ValueError(f"Alignment input bytes changed: {row['sample_id']}")
+        rgb = rgb.resize((row["width"], row["height"]), Image.Resampling.BILINEAR)
+    if rgb.size != (row["width"], row["height"]):
+        raise ValueError(f"Image dimensions differ from manifest: {row['sample_id']}")
+    return rgb
 
 
 def load_manifest(path, root, dataset=None, split=None, labeled=True):
@@ -57,7 +82,7 @@ def index_files(folder, suffix):
     return result
 
 
-def verify_pair(root, image_path, label_path, encoding, dataset, sample_id):
+def verify_pair(root, image_path, label_path, encoding, dataset, sample_id, allow_half_size_rgb=False):
     with Image.open(image_path) as image:
         image.load()
         width, height = image.size
@@ -69,21 +94,34 @@ def verify_pair(root, image_path, label_path, encoding, dataset, sample_id):
         with Image.open(label_path) as label:
             label.load()
             if label.size != (width, height):
-                raise ValueError(f"Image/label size mismatch: {sample_id}")
+                if dataset == "gta" and allow_half_size_rgb and label.size == (2*width, 2*height):
+                    row["image_alignment"] = {
+                        "policy":HALF_SIZE_RGB_POLICY, "original_hw":[height, width],
+                        "target_hw":[label.height, label.width],
+                        "original_image_sha256":sha256(image_path), "label_sha256":sha256(label_path),
+                    }
+                    row.update(height=label.height, width=label.width)
+                else:
+                    raise ValueError(
+                        f"Image/label size mismatch: {sample_id}; "
+                        f"image={width}x{height} ({image_path}); "
+                        f"label={label.width}x{label.height} ({label_path}). "
+                        "Check the original ZIP members before resizing or excluding this pair."
+                    )
             mask = map_labels(np.asarray(label), encoding, "error", dataset=dataset)
         histogram = np.bincount(mask[mask != 255], minlength=19)
         row.update(label_path=label_path.relative_to(root).as_posix(), label_encoding=encoding)
     return row, histogram
 
 
-def paired_rows(root, images, labels, encoding, dataset):
+def paired_rows(root, images, labels, encoding, dataset, half_size_rgb_ids=()):
     if labels is not None and images.keys() != labels.keys():
         raise ValueError(f"Pair mismatch: missing labels={sorted(images.keys()-labels.keys())[:10]}, "
                          f"extra labels={sorted(labels.keys()-images.keys())[:10]}")
     rows, histogram = [], np.zeros(19, dtype=np.int64)
     for key in sorted(images):
         row, counts = verify_pair(root, images[key], labels[key] if labels else None,
-                                  encoding, dataset, f"{dataset}/{key}")
+                                  encoding, dataset, f"{dataset}/{key}", key in half_size_rgb_ids)
         rows.append(row)
         histogram += counts
     return rows, histogram.tolist()
@@ -98,12 +136,16 @@ def save_rows(path, rows, split):
 
 
 def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fraction=0.05,
-                    seed=42, include_target_train=False):
+                    seed=42, include_target_train=False, gta_upsample_image_ids=None):
     root, output = Path(root).resolve(), Path(output).resolve()
     if not 0 < dev_fraction < 1:
         raise ValueError("dev_fraction must be between 0 and 1")
-    source, gta_hist = paired_rows(root, index_files(root/"gta/images", ".png"),
-                                   index_files(root/"gta/labels", ".png"), gta_encoding, "gta")
+    gta_images = index_files(root/"gta/images", ".png")
+    upsample_ids = set(gta_upsample_image_ids or ())
+    if upsample_ids - gta_images.keys():
+        raise ValueError(f"Unknown GTA upsample IDs: {sorted(upsample_ids-gta_images.keys())}")
+    source, gta_hist = paired_rows(root, gta_images,
+                                   index_files(root/"gta/labels", ".png"), gta_encoding, "gta", upsample_ids)
     if len(source) < 2:
         raise ValueError("Need at least 2 GTA images for disjoint train/dev splits")
     shuffled = list(source)
@@ -116,6 +158,10 @@ def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fra
     report = {"seed": seed, "source_split_policy": "seeded image-level random split; no scene grouping metadata",
               "mapping": RAW_TO_TRAIN, "gta_encoding": gta_encoding, "city_encoding": city_encoding,
               "gta_extra_raw_ignore_ids": [34],
+              "gta_upsample_image_ids_requested":sorted(upsample_ids),
+              "image_alignments":[{"sample_id":r["sample_id"], "image_path":r["image_path"],
+                                   "label_path":r["label_path"], **r["image_alignment"]}
+                                  for r in source if r.get("image_alignment")],
               "class_mapping":[{"class_name":name,"raw_id":raw,"train_id":train}
                                for train,(name,raw) in enumerate(zip(CLASS_NAMES,RAW_IDS))],
               "source_class_pixels": gta_hist, "city_val_class_pixels": city_hist, "manifests": {}}

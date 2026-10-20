@@ -1,5 +1,18 @@
 # CRISP-DA B0 — hướng dẫn chạy mã nguồn
 
+GTA RGB half-size: CLI `make-manifests --gta-upsample-image-id 15188` cho phép
+riêng RGB nhỏ đúng 1/2 nhãn ở ID đã kiểm tra được upsample bilinear khi đọc.
+Mask/PNG gốc giữ nguyên; manifest ghi policy, dimensions và SHA256 để inspect
+và loader áp dụng nhất quán. Mismatch khác vẫn lỗi. Xem
+[chẩn đoán và cách áp dụng](GTA_SIZE_MISMATCH_DIAGNOSTIC.md), rồi kiểm tra overlay.
+
+Evaluation theo epoch: bật `train.eval_every_epoch: true`; `eval_every: 0` chỉ
+đánh giá cuối mỗi source epoch và cuối run. Số dương thêm cadence theo steps.
+`eval_history.csv`/`eval_history.jsonl` lưu mIoU, validation CE, pixel accuracy,
+19 IoU, epoch/step và split xuyên các đoạn resume. Xem
+[hướng dẫn và cell vẽ biểu đồ](EPOCH_EVAL_LOGGING.md). Runbook yêu cầu commit/push
+code mới để MoLab dùng trainer có feature này; checkout cũ không tự có history.
+
 Mapping update (2026-10-17): raw ID `34` observed in GTA masks is mapped to
 `255` (ignored), since it is outside the benchmark's 19 raw IDs. This is
 GTA-specific and applies to manifest validation, inspection and training.

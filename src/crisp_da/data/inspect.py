@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from crisp_da.data.manifest import load_manifest, resolve_data_path
+from crisp_da.data.manifest import load_manifest, read_rgb, resolve_data_path
 from crisp_da.data.mapping import CLASS_NAMES, colorize, map_labels
 from crisp_da.utils import sha256, write_json
 
@@ -15,8 +15,7 @@ def inspect_manifest(root, manifest, output, limit=None):
     histogram = np.zeros(19, dtype=np.int64)
     count, ignored, raw_values = 0, 0, set()
     for row in rows[:limit] if limit is not None else rows:
-        with Image.open(resolve_data_path(root,row["image_path"])) as f:
-            rgb = np.array(f.convert("RGB"))
+        rgb = np.array(read_rgb(root, row))
         with Image.open(resolve_data_path(root,row["label_path"])) as f:
             raw = np.array(f)
         raw_values.update(np.unique(raw).tolist())

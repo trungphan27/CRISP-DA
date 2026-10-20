@@ -1,4 +1,5 @@
 import copy
+import csv
 import json
 import random
 from pathlib import Path
@@ -7,9 +8,10 @@ import numpy as np
 import pytest
 import torch
 
-from crisp_da.config import load_config
+from crisp_da.config import load_config, validate_config
 from crisp_da.engine.checkpoint import load_checkpoint
 from crisp_da.engine.evaluate import confusion_update, metrics_from_confusion, evaluate
+from crisp_da.engine.history import align_eval_history, read_eval_history, save_eval_record
 from crisp_da.engine.optim import WarmupPoly, build_optimizer, supervised_ce
 from crisp_da.engine.train import train, make_datasets, val_loader
 from crisp_da.models.segmentor import build_model
@@ -73,6 +75,81 @@ def test_scheduler_update_and_optimizer_partition(fixture_config):
     for _ in range(fixture_config["train"]["max_steps"]):
         sched.step()
     assert opt.param_groups[0]["lr"] == 0 and initial > 0
+
+
+def test_eval_ce_is_valid_pixel_weighted_and_all_ignore_is_null():
+    class Fixed(torch.nn.Module):
+        def forward(self, image):
+            logits = torch.zeros((1, 19, 2, 2))
+            logits[:, 0] = 2
+            return {"logits": logits}
+    labels = [torch.tensor([[[0, 255], [1, 255]]]), torch.tensor([[[0]]])]
+    batches = [{"image":torch.zeros(1, 3, 2, 2), "label":label} for label in labels]
+    result = evaluate(Fixed(), batches, torch.device("cpu"))
+    log_denom = torch.log(torch.exp(torch.tensor(2.)) + 18).item()
+    assert result["loss_ce"] == pytest.approx((3*log_denom - 4)/3)
+    assert result["pixel_accuracy"] == pytest.approx(2/3)
+    assert result["valid_pixels"] == 3
+    batches[0]["label"].fill_(255)
+    empty = evaluate(Fixed(), batches[:1], torch.device("cpu"))
+    assert empty["loss_ce"] is None and empty["pixel_accuracy"] is None
+
+
+def test_epoch_eval_at_real_boundary_with_accumulation_and_resume(fixture_config, tmp_path):
+    cfg = fixture_config
+    cfg["train"].update(eval_every_epoch=True, eval_every=2, grad_accumulation=2)
+    validate_config(cfg)
+    train(cfg)
+    run = Path(cfg["paths"]["run_dir"])
+    full_history = read_eval_history(run)
+    assert json.loads((run/"data.json").read_text())["nominal_optimizer_steps_per_epoch"] == 2
+    assert [(r["epoch"], r["step"]) for r in full_history] == [(1., 2), (1., 2), (2., 4), (2., 4)]
+    assert all(r["source_position"] == 0 and "epoch_end" in r["triggers"] for r in full_history)
+    assert all("steps" in r["triggers"] for r in full_history)
+    assert all("final" in r["triggers"] for r in full_history[-2:])
+    with (run/"eval_history.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 4 and "iou_traffic_light" in rows[0]
+    assert float(rows[-1]["loss_ce"]) >= 0
+    resumed_cfg = copy.deepcopy(cfg)
+    resumed_run = tmp_path/"epoch-resume"
+    resumed_cfg["paths"]["run_dir"] = str(resumed_run)
+    train(resumed_cfg, stop_after=1)
+    assert read_eval_history(resumed_run) == []  # Chunk end is not an epoch end.
+    train(resumed_cfg, resume=resumed_run/"last.pt", stop_after=2)
+    assert len(read_eval_history(resumed_run)) == 2
+    train(resumed_cfg, resume=resumed_run/"last.pt")
+    assert read_eval_history(resumed_run) == full_history
+    # Reopening an already completed checkpoint must not duplicate records.
+    train(resumed_cfg, resume=resumed_run/"last.pt")
+    assert read_eval_history(resumed_run) == full_history
+    full = load_checkpoint(run/"last.pt")
+    restored = load_checkpoint(resumed_run/"last.pt")
+    for key in full["model"]:
+        torch.testing.assert_close(full["model"][key], restored["model"][key], atol=0, rtol=0)
+
+
+def test_epoch_only_eval_config_and_history_rollback(fixture_config, tmp_path):
+    cfg = fixture_config
+    cfg["train"].update(eval_every_epoch=True, eval_every=0)
+    validate_config(cfg)
+    train(cfg)
+    history = read_eval_history(cfg["paths"]["run_dir"])
+    assert [(r["step"], r["triggers"]) for r in history] == [
+        (3, ["epoch_end"]), (3, ["epoch_end"]), (4, ["final"]), (4, ["final"]),
+    ]
+    cfg["train"]["eval_every_epoch"] = False
+    with pytest.raises(ValueError, match="eval_every"):
+        validate_config(cfg)
+    record = {"epoch":1.0, "completed_epochs":1, "source_position":0, "step":3,
+              "split":"target_val", "triggers":["epoch_end"], "miou":None,
+              "per_class_iou":dict.fromkeys(metrics_from_confusion(torch.zeros(19,19))["per_class_iou"])}
+    save_eval_record(tmp_path, record)
+    save_eval_record(tmp_path, record)
+    assert len(read_eval_history(tmp_path)) == 1
+    save_eval_record(tmp_path, dict(record, step=5, epoch=1.8, source_position=4))
+    align_eval_history(tmp_path, step=5, completed_epochs=1, source_position=0)
+    assert read_eval_history(tmp_path) == [record]
 
 
 def test_resume_matches_uninterrupted_training(fixture_config,tmp_path):

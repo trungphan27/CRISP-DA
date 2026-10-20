@@ -1,5 +1,6 @@
 import contextlib
 import json
+import math
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from crisp_da.data.sampler import StatefulBatchSampler
 from crisp_da.data.transforms import SegmentationTransform
 from crisp_da.engine.checkpoint import load_checkpoint, restore_rng, save_checkpoint
 from crisp_da.engine.evaluate import evaluate
+from crisp_da.engine.history import align_eval_history, save_eval_record
 from crisp_da.engine.optim import WarmupPoly, build_optimizer
 from crisp_da.models.segmentor import build_model
 from crisp_da.utils import environment, seed_all, sha256, write_json
@@ -115,6 +117,7 @@ def train(cfg, resume=None, stop_after=None):
                         generator=torch.Generator().manual_seed(cfg["seed"]), pin_memory=device.type == "cuda")
     validation = {key:val_loader(datasets[key], train_cfg["workers"]) for key in ("source_dev", "target_val")}
     step, best, skipped = 0, None, 0
+    eval_every_epoch = train_cfg.get("eval_every_epoch", False)
     if checkpoint:
         model.load_state_dict(checkpoint["model"], strict=True)
         model.provenance = checkpoint["provenance"]
@@ -126,9 +129,16 @@ def train(cfg, resume=None, stop_after=None):
         if scheduler.completed != step:
             raise ValueError("Scheduler and optimizer step disagree")
         restore_rng(checkpoint["rng"])
+    align_eval_history(run_dir, step if checkpoint else None, sampler.epoch, sampler.position)
     write_json(run_dir/"config.json", cfg)
     write_json(run_dir/"environment.json", {**environment(), "resolved_device":str(device), "resolved_precision":precision})
-    write_json(run_dir/"data.json", {"manifest_hashes":hashes, "counts":{k:len(v) for k,v in datasets.items()}})
+    write_json(run_dir/"data.json", {
+        "manifest_hashes":hashes, "counts":{k:len(v) for k,v in datasets.items()},
+        "epoch_definition":"one full pass over source_train; held-out source_dev excluded",
+        "nominal_optimizer_steps_per_epoch":math.ceil(math.ceil(sampler.size/train_cfg["batch_size"])
+                                                      /train_cfg["grad_accumulation"]),
+        "eval_every_epoch":eval_every_epoch,
+    })
     write_json(run_dir/"encoder_provenance.json", model.provenance)
     logs = []
     log_path = run_dir/(f"metrics_resume_{step}.jsonl" if checkpoint else "metrics.jsonl")
@@ -146,6 +156,36 @@ def train(cfg, resume=None, stop_after=None):
     def autocast():
         return torch.autocast("cuda", dtype=torch.bfloat16 if precision == "bf16" else torch.float16) if precision != "fp32" else contextlib.nullcontext()
 
+    def evaluate_due(epoch_ended, updated):
+        nonlocal best
+        triggers = []
+        if eval_every_epoch and epoch_ended:
+            triggers.append("epoch_end")
+        if updated and train_cfg["eval_every"] and step % train_cfg["eval_every"] == 0:
+            triggers.append("steps")
+        if updated and step == train_cfg["max_steps"]:
+            triggers.append("final")
+        if not triggers:
+            return
+        # Skipped updates can finish several epochs without increasing step.
+        folder = f"step_{step}" if updated else f"step_{step}_epoch_{sampler.epoch}"
+        for split, val in validation.items():
+            result = evaluate(model, val, device, run_dir/"eval"/folder/split,
+                              mean=cfg["data"]["mean"], std=cfg["data"]["std"])
+            record = {"event":"eval", "step":step, "split":split,
+                      "epoch":sampler.epoch + sampler.position/sampler.size,
+                      "completed_epochs":sampler.epoch, "source_position":sampler.position,
+                      "triggers":triggers, "miou":result["miou"], "loss_ce":result["loss_ce"],
+                      "pixel_accuracy":result["pixel_accuracy"], "samples":result["samples"],
+                      "valid_pixels":result["valid_pixels"], "classes_with_union":result["classes_with_union"],
+                      "per_class_iou":result["per_class_iou"]}
+            save_eval_record(run_dir, record)
+            log(record)
+            if split == "target_val" and result["miou"] is not None and (best is None or result["miou"] > best):
+                best = result["miou"]
+                if train_cfg["save_best_target_val"]:
+                    save("best_target_val.pt")
+
     model.train()
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -155,14 +195,21 @@ def train(cfg, resume=None, stop_after=None):
     while step < target_step:
         started = time.perf_counter()
         batches = []
+        epoch_ended = False
         for _ in range(train_cfg["grad_accumulation"]):
             try:
                 batch = next(iterator)
             except StopIteration:
                 iterator = iter(loader)
                 batch = next(iterator)
+            previous_epoch = sampler.epoch
             sampler.advance(len(batch["sample_id"]))
+            epoch_ended = epoch_ended or sampler.epoch > previous_epoch
             batches.append(batch)
+            # Evaluate the actual epoch-end model, before consuming the next
+            # epoch. A final accumulation group can contain fewer microbatches.
+            if eval_every_epoch and epoch_ended:
+                break
         valid_pixels = sum(int((batch["label"] != 255).sum()) for batch in batches)
         optimizer.zero_grad(set_to_none=True)
         if valid_pixels == 0:
@@ -171,6 +218,7 @@ def train(cfg, resume=None, stop_after=None):
             log({"event":"skip", "step":step, "reason":"all_source_pixels_ignore"})
             if consecutive_skips >= train_cfg["max_skipped_updates"]:
                 raise RuntimeError("Too many skipped source updates; inspect labels/crops")
+            evaluate_due(epoch_ended, updated=False)
             continue
         loss_value = 0.
         for batch in batches:
@@ -199,6 +247,7 @@ def train(cfg, resume=None, stop_after=None):
             log({"event":"skip", "step":step, "reason":"fp16_overflow"})
             if consecutive_skips >= train_cfg["max_skipped_updates"]:
                 raise RuntimeError("Too many FP16 overflows")
+            evaluate_due(epoch_ended, updated=False)
             continue
         consecutive_skips = 0
         step += 1
@@ -210,23 +259,19 @@ def train(cfg, resume=None, stop_after=None):
             log({"event":"train", "step":step, "loss":loss_value, "lr":used_lrs,
                  "seconds_per_step":elapsed, "grad_norm":float(norm), "valid_pixels":valid_pixels,
                  "peak_vram_gib":torch.cuda.max_memory_allocated(device)/1024**3 if device.type == "cuda" else 0.,
-                 "epoch":sampler.epoch, "sample_ids":[sid for b in batches for sid in b["sample_id"]]})
-        # A manual pause does not introduce evaluations absent from the full stream.
-        if step % train_cfg["eval_every"] == 0 or step == train_cfg["max_steps"]:
-            for split, val in validation.items():
-                result = evaluate(model, val, device, run_dir/"eval"/f"step_{step}"/split)
-                log({"event":"eval", "step":step, "split":split,
-                     "miou":result["miou"], "samples":result["samples"]})
-                if split == "target_val" and result["miou"] is not None and (best is None or result["miou"] > best):
-                    best = result["miou"]
-                    if train_cfg["save_best_target_val"]:
-                        save("best_target_val.pt")
+                 "epoch":sampler.epoch + sampler.position/sampler.size,
+                 "completed_epochs":sampler.epoch,
+                 "sample_ids":[sid for b in batches for sid in b["sample_id"]]})
+        # Pausing a chunk does not add an evaluation unless an epoch ends.
+        evaluate_due(epoch_ended, updated=True)
         if step % train_cfg["checkpoint_every"] == 0 and step != target_step:
             save()
     # A resume at an already completed step remains a valid readback.
     save()
     write_loss_curve(run_dir/("loss_curve_resume.svg" if checkpoint else "loss_curve.svg"), logs)
     summary = {"step":step, "max_steps":train_cfg["max_steps"], "kind":cfg["run"]["kind"],
+               "completed_epochs":sampler.epoch, "epoch":sampler.epoch + sampler.position/sampler.size,
+               "eval_history":"eval_history.csv",
                "training_finished":step == train_cfg["max_steps"],
                "best_target_val_miou_observed":best,
                "model_selection":"fixed_step; optional best_target_val uses target validation labels",

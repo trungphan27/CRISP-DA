@@ -9,7 +9,7 @@ from PIL import Image
 
 from crisp_da.data.archive import extract_zip
 from crisp_da.data.inspect import inspect_manifest
-from crisp_da.data.manifest import build_manifests, load_manifest, resolve_data_path
+from crisp_da.data.manifest import build_manifests, load_manifest, read_rgb, resolve_data_path
 from crisp_da.data.mapping import RAW_IDS, map_labels
 from crisp_da.data.sampler import StatefulBatchSampler
 from crisp_da.data.transforms import SegmentationTransform
@@ -100,6 +100,74 @@ def test_manifest_rejects_encoding_duplicate_and_traversal(fixture_config):
     for value in ("../outside.png","/etc/passwd","gta\\images\\00000.png"):
         with pytest.raises(ValueError):
             resolve_data_path(root,value)
+
+
+def test_manifest_reports_both_resolutions_and_preserves_bad_pair(fixture_config):
+    root = Path(fixture_config["paths"]["data_root"])
+    path = root / "gta/labels/00000.png"
+    with Image.open(path) as label:
+        width, height = label.size
+    Image.fromarray(np.full((height, width + 1), 7, dtype=np.uint8)).save(path)
+    original_bytes = path.read_bytes()
+    with pytest.raises(ValueError, match="Image/label size mismatch") as exc:
+        build_manifests(root, root / "new-manifests", "raw_ids")
+    assert f"image={width}x{height}" in str(exc.value)
+    assert f"label={width+1}x{height}" in str(exc.value)
+    assert "gta/00000" in str(exc.value)
+    assert path.read_bytes() == original_bytes
+    assert not (root / "new-manifests/source_train.jsonl").exists()
+
+
+def test_explicit_half_size_rgb_alignment_shared_by_manifest_inspect_loader(fixture_config):
+    root = Path(fixture_config["paths"]["data_root"])
+    rgb_path, label_path = root/"gta/images/00000.png", root/"gta/labels/00000.png"
+    with Image.open(rgb_path) as image:
+        width, height = image.size
+        half = image.resize((width//2, height//2), Image.Resampling.BILINEAR)
+    half.save(rgb_path)
+    # Palette masks are indices; preserve their bytes and IDs throughout.
+    with Image.open(label_path) as label:
+        label.convert("P").save(root/"palette.png")
+    (root/"palette.png").replace(label_path)
+    image_bytes, label_bytes = rgb_path.read_bytes(), label_path.read_bytes()
+    with pytest.raises(ValueError, match="size mismatch"):
+        build_manifests(root, root/"manifests", "raw_ids")
+    report = build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["00000"])
+    assert len(report["image_alignments"]) == 1
+    rows = load_manifest(root/"manifests/source_train.jsonl", root)
+    rows += load_manifest(root/"manifests/source_dev.jsonl", root)
+    row = next(r for r in rows if r["sample_id"] == "gta/00000")
+    assert row["image_alignment"]["original_hw"] == [height//2, width//2]
+    assert row["image_alignment"]["target_hw"] == [height, width]
+    assert read_rgb(root, row).size == (width, height)
+    one = root/"aligned-preview.jsonl"
+    one.write_text(json.dumps(row)+"\n")
+    inspected = inspect_manifest(root, one, root/"aligned-inspection")
+    assert inspected["inspected"] == 1
+    datasets, _ = make_datasets(fixture_config)
+    ds = next(ds for ds in datasets.values() if any(r["sample_id"] == row["sample_id"] for r in ds.rows))
+    index = next(i for i, r in enumerate(ds.rows) if r["sample_id"] == row["sample_id"])
+    sample = ds[index]
+    assert sample["original_hw"] == (height, width)
+    assert sample["label"].ndim == 2
+    assert rgb_path.read_bytes() == image_bytes
+    assert label_path.read_bytes() == label_bytes
+    # Same-size edits after manifest creation must not silently change an exception.
+    Image.new("RGB", (width//2, height//2), "red").save(rgb_path)
+    with pytest.raises(ValueError, match="input bytes changed"):
+        read_rgb(root, row)
+
+
+def test_half_size_rgb_alignment_rejects_wrong_id_and_other_ratios(fixture_config):
+    root = Path(fixture_config["paths"]["data_root"])
+    with pytest.raises(ValueError, match="Unknown GTA upsample IDs"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["15188"])
+    path = root/"gta/images/00000.png"
+    with Image.open(path) as image:
+        wrong = image.resize((image.width//2, image.height//2 + 1))
+    wrong.save(path)
+    with pytest.raises(ValueError, match="size mismatch"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["00000"])
 
 
 def test_sampler_cursor_ignores_prefetch():

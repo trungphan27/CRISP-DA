@@ -42,9 +42,14 @@ def validate_config(cfg):
         raise ValueError("model.variant must be b5 or tiny_test")
     if model["feature_dim"] != 256:
         raise ValueError("B0 decoder contract requires feature_dim=256")
-    for key in ("max_steps", "batch_size", "grad_accumulation", "log_every", "eval_every", "checkpoint_every"):
+    for key in ("max_steps", "batch_size", "grad_accumulation", "log_every", "checkpoint_every"):
         if not isinstance(train[key], int) or train[key] <= 0:
             raise ValueError(f"train.{key} must be a positive integer; choose the run budget explicitly")
+    if not isinstance(train.get("eval_every_epoch", False), bool):
+        raise ValueError("train.eval_every_epoch must be a boolean")
+    if (type(train["eval_every"]) is not int or train["eval_every"] < 0
+            or (train["eval_every"] == 0 and not train.get("eval_every_epoch", False))):
+        raise ValueError("eval_every must be positive, or 0 with eval_every_epoch=true")
     if not 0 <= train["warmup_steps"] < train["max_steps"] or train["poly_power"] <= 0:
         raise ValueError("Invalid warmup/poly schedule")
     if train["precision"] not in {"fp32", "fp16", "bf16", "auto"}:
@@ -77,6 +82,7 @@ def validate_config(cfg):
 def resume_contract(cfg):
     # Paths, hardware and worker counts may change when moving to another runtime.
     out = copy.deepcopy(cfg)
+    out["train"].setdefault("eval_every_epoch", False)
     out.pop("paths", None)
     for key in ("device", "workers"):
         out["train"].pop(key, None)

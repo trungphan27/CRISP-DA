@@ -1,5 +1,21 @@
 # Trạng thái kiểm chứng B0
 
+**GTA RGB alignment (19/10/2026):** trường hợp người dùng quan sát ở `15188`
+là RGB 957×526, mask palette 1914×1052. CLI opt-in theo ID chỉ phóng RGB đúng 2×
+bilinear khi đọc, giữ nguyên mask/PNG. Policy, sizes và hashes nằm trong manifest;
+loader và inspect dùng chung đường đọc. **23 tests đạt**, gồm default strict,
+unknown ID/tỷ lệ khác bị từ chối, palette bytes giữ nguyên và phát hiện input
+bị thay đổi sau khi tạo manifest. Vẫn cần xem overlay thực tế trên MoLab.
+
+**Cập nhật 19/10/2026 — epoch evaluation:** đã bổ sung `eval_every_epoch`,
+validation CE theo valid pixels, pixel accuracy và `eval_history.csv/jsonl` với
+mIoU/19 IoU, epoch và optimizer step. Bộ kiểm thử đạt **20 tests**; sau thay đổi
+metadata và bổ sung kiểm tra runtime epoch-only, hai test liên quan được chạy
+lại và đạt. Đã kiểm tra epoch boundary với accumulation, nối lịch sử và model
+state tương đương khi resume, gộp trigger trùng và loại log tương lai khi rollback.
+Đây là kiểm chứng CPU tiny/local, chưa phải benchmark B5 MoLab trên GTA đầy đủ.
+Xem [hướng dẫn](EPOCH_EVAL_LOGGING.md).
+
 Ngày: **17/10/2026**. Phạm vi: implementation local; chưa có kết quả benchmark GTA5 → Cityscapes.
 
 ## Môi trường dùng để kiểm chứng local

@@ -25,6 +25,7 @@ def metrics_from_confusion(matrix):
     ious = [float(tp[i]/union[i]) if union[i] > 0 else None for i in range(19)]
     present = [iou for iou in ious if iou is not None]
     return {"miou":sum(present)/len(present) if present else None,
+            "pixel_accuracy":float(tp.sum()/counts.sum()) if counts.sum() > 0 else None,
             "per_class_iou":dict(zip(CLASS_NAMES,ious)), "classes_with_union":len(present),
             "absent_class_policy":"exclude zero-union classes; null per-class IoU",
             "valid_pixels":int(counts.sum()), "confusion_matrix":matrix.tolist()}
@@ -35,13 +36,15 @@ def evaluate(model, loader, device, output=None, max_visualizations=4,
              mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)):
     was_training = model.training
     model.eval()
-    matrix, samples = torch.zeros((19,19), dtype=torch.int64), 0
+    matrix, samples, loss_sum = torch.zeros((19,19), dtype=torch.int64), 0, 0.0
     try:
         for batch in loader:
             # Batch size 1 preserves variable original GT dimensions.
             image, labels = batch["image"].to(device), batch["label"].to(device)
             logits = model(image)["logits"]
-            prediction = F.interpolate(logits.float(), size=labels.shape[-2:], mode="bilinear", align_corners=False).argmax(1)
+            logits_at_gt = F.interpolate(logits.float(), size=labels.shape[-2:], mode="bilinear", align_corners=False)
+            loss_sum += float(F.cross_entropy(logits_at_gt, labels, ignore_index=255, reduction="sum"))
+            prediction = logits_at_gt.argmax(1)
             confusion_update(matrix, prediction, labels)
             if output is not None and samples < max_visualizations:
                 output = Path(output)
@@ -61,6 +64,7 @@ def evaluate(model, loader, device, output=None, max_visualizations=4,
         model.train(was_training)
     result = {**metrics_from_confusion(matrix), "samples":samples,
               "protocol":"single-scale whole-image; bilinear logits to original GT; no GT resize/TTA"}
+    result["loss_ce"] = loss_sum / result["valid_pixels"] if result["valid_pixels"] else None
     if output is not None:
         write_json(Path(output)/"metrics.json", result)
         Path(output).mkdir(parents=True,exist_ok=True)

@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 
-from crisp_da.data.manifest import load_manifest, resolve_data_path
+from crisp_da.data.manifest import load_manifest, read_rgb, resolve_data_path
 from crisp_da.data.mapping import map_labels
 
 
@@ -22,8 +22,7 @@ class ManifestDataset(Dataset):
     def __getitem__(self, key):
         epoch, index = key if isinstance(key, tuple) else (0, key)
         row = self.rows[index]
-        with Image.open(resolve_data_path(self.root, row["image_path"])) as im:
-            image = im.convert("RGB")
+        image = read_rgb(self.root, row)
         with Image.open(resolve_data_path(self.root, row["label_path"])) as im:
             mask = map_labels(np.asarray(im), self.encoding, self.unknown_policy,
                               dataset=row["dataset"])
