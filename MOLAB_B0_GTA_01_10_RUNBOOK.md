@@ -81,6 +81,8 @@ so sánh manifest. Cell 13 bỏ qua smoke; cell 14 lấy nguyên config từ che
 Trong MoLab nên dùng chế độ chạy thủ công cho notebook có tác vụ dài. Các cell
 download và extraction có kiểm tra file cũ. Hai cell training có **Run button**;
 không dùng Run All để thay cho việc đọc kết quả từng bước.
+Sau giải nén phải chạy **Cell 9a** quét kích thước toàn GTA rồi mới chạy Cell 10;
+bước này gom mọi ID half-size cùng lúc thay vì gặp lỗi lần lượt từng ảnh.
 
 ## Cell 1 — Đường dẫn, chế độ và clone đúng phiên bản code
 
@@ -108,7 +110,8 @@ WORK = Path("/marimo/crisp-work")
 DATA = WORK / "data-gta01-10"
 REUSE_DATA = WORK / "data-gta01-03"  # Nguồn PNG cũ nếu còn ở cùng runtime
 GTA_PARTS = tuple(range(1, 11))
-GTA_UPSAMPLE_IMAGE_IDS = ["15188"]  # RGB half-size đã phát hiện; xem overlay trước train
+GTA_UPSAMPLE_IMAGE_IDS = ["15188", "17705"]  # Các ID đã biết; Cell 9a quét tìm thêm
+GTA_RESIZE_IMAGE_IDS = ["20801"]  # RGB 1914x1046 -> label 1276x697; xem overlay ở Cell 11
 PROVENANCE_PATH = DATA / "archives_provenance.json"
 CACHE = WORK / "cache/huggingface"
 ARCHIVES = WORK / "cache/archives"
@@ -182,6 +185,7 @@ _manifest_help = subprocess.check_output([
     sys.executable, "-m", "crisp_da.cli", "make-manifests", "--help"
 ], cwd=REPO, text=True)
 assert "--gta-upsample-image-id" in _manifest_help, "Cần commit/push và checkout code mới có RGB alignment"
+assert "--gta-resize-image-id" in _manifest_help, "Cần commit/push và checkout code mới hỗ trợ GTA same-aspect resize"
 ```
 
 ## Cell 3 — Helper và kiểm tra GPU/RAM/đĩa
@@ -578,17 +582,95 @@ print("Selected extracted GiB:", _selected_bytes / 1024**3)
 print("Reused hard links:", _reused_links, "copied:", _reused_copies, "newly extracted:", _extracted)
 ```
 
+## Cell 9a — Quét kích thước toàn GTA một lần trước khi tạo manifest
+
+Không chờ make-manifests lần lượt dừng ở `15188`, `17705`, rồi ID kế tiếp.
+Cell này chỉ đọc header ảnh/nhãn của toàn bộ source, không sửa PNG. Nó gom các
+ID có RGB **nhỏ đúng 1/2 ở cả hai chiều**, hoặc cùng tỷ lệ khung hình với nhãn
+trong sai số làm tròn tối đa 1 pixel chiều cao đích. In kích thước và ghi report;
+thiếu/trùng cặp, header lỗi hoặc khác tỷ lệ vượt ngưỡng sẽ chặn bước tiếp theo.
+
+Tạo **một cell mới sau Cell 9**, chạy trước Cell 10. Các public variables
+GTA_DETECTED_UPSAMPLE_IDS, GTA_DETECTED_RESIZE_IDS và GTA_DIMENSION_AUDIT chỉ
+định nghĩa ở cell này. Các danh sách thủ công của Cell 1 không định nghĩa lại.
+Đây là bước gom allowlist theo hai policy kích thước đã chọn, không xác nhận semantic
+alignment bằng kích thước; Cell 11 vẫn phải xem overlay từng mẫu ngoại lệ.
+
+```python
+from PIL import Image as _Image
+from crisp_da.data.manifest import same_aspect_with_rounding as _same_aspect
+
+_files = {}
+for _kind in ("images", "labels"):
+    _files[_kind] = {}
+    for _path in sorted((DATA / "gta" / _kind).rglob("*.png")):
+        if _path.stem in _files[_kind]:
+            raise RuntimeError(f"Trùng {_kind} ID: {_path.stem}")
+        _files[_kind][_path.stem] = _path
+if not _files["images"] or _files["images"].keys() != _files["labels"].keys():
+    raise RuntimeError("Không có dữ liệu hoặc thiếu cặp GTA image/label")
+
+_half_size = []
+_same_aspect_pairs = []
+_blocking = []
+for _number, _id in enumerate(sorted(_files["images"]), 1):
+    try:
+        with _Image.open(_files["images"][_id]) as _rgb:
+            _rgb_wh = _rgb.size
+        with _Image.open(_files["labels"][_id]) as _label:
+            _label_wh = _label.size
+        if _rgb_wh != _label_wh:
+            _entry = {"sample_id": _id, "image_wh": list(_rgb_wh), "label_wh": list(_label_wh)}
+            if _label_wh == (2 * _rgb_wh[0], 2 * _rgb_wh[1]):
+                _half_size.append(_entry)
+            elif _same_aspect(_rgb_wh, _label_wh):
+                _same_aspect_pairs.append(_entry)
+            else:
+                _blocking.append({**_entry, "reason": "unsupported_size_ratio"})
+    except (OSError, ValueError) as _error:
+        _blocking.append({"sample_id": _id, "reason": "header_error", "error": str(_error)})
+    if _number % 1000 == 0:
+        print("Scanned", _number, "pairs; half-size:", len(_half_size),
+              "same-aspect:", len(_same_aspect_pairs), "other issues:", len(_blocking), flush=True)
+
+GTA_DIMENSION_AUDIT = {
+    "pairs_scanned": len(_files["images"]),
+    "half_size_rgb_pairs": _half_size,
+    "same_aspect_rgb_pairs": _same_aspect_pairs,
+    "blocking_issues": _blocking,
+}
+GTA_DETECTED_UPSAMPLE_IDS = [_entry["sample_id"] for _entry in _half_size]
+GTA_DETECTED_RESIZE_IDS = [_entry["sample_id"] for _entry in _same_aspect_pairs]
+(DATA / "gta_dimension_audit.json").write_text(
+    json.dumps(GTA_DIMENSION_AUDIT, indent=2), encoding="utf-8"
+)
+print(json.dumps(GTA_DIMENSION_AUDIT, indent=2))
+print("Detected half-size RGB IDs:", GTA_DETECTED_UPSAMPLE_IDS)
+print("Detected same-aspect RGB resize IDs:", GTA_DETECTED_RESIZE_IDS)
+if _blocking:
+    raise RuntimeError("Có lỗi ngoài hai policy kích thước; xem gta_dimension_audit.json trước khi tiếp tục")
+```
+
+Full decode/label-ID scan ở Cell 10 vẫn bắt buộc. Nếu resume, chạy lại audit trên
+cùng data; manifest hash phải khớp snapshot, không tự đổi ảnh hoặc split.
+
 ## Cell 10 — Scan đầy đủ, tạo manifests và kiểm tra resume
 
 Nếu gặp `Image/label size mismatch: gta/15188` (hoặc ID khác), dừng và chạy
 [cell chẩn đoán kích thước](GTA_SIZE_MISMATCH_DIAGNOSTIC.md) để in width/height
-và so SHA256 PNG local với member gốc trong ZIP. Với ID `15188` đã quan sát:
+và so SHA256 PNG local với member gốc trong ZIP. Với ID `15188` và `17705` đã quan sát:
 RGB 957×526, mask P 1914×1052. Tùy chọn riêng ở Cell 1 cho phép phóng **RGB**
 bilinear đúng 2× khi đọc để khớp mask; không sửa PNG, không resize mask, không
 loại mẫu. Chính sách và SHA256 hai input được ghi trong manifest/report.
-Chỉ ID có trong danh sách mới được áp dụng; mọi tỷ lệ khác vẫn báo lỗi.
+Với `20801`, RGB 1914×1046 và mask 1276×697: scale theo chiều rộng là 2/3,
+chiều cao dự kiến 697.333 pixel, chênh mask 1/3 pixel. Policy riêng resize RGB
+bilinear về 1276×697; giữ nguyên mask và PNG gốc. Cùng tỷ lệ kích thước chưa đủ
+chứng minh nội dung căn chỉnh đúng, vì vậy phải xem overlay ở Cell 11.
+Danh sách hợp nhất từ Cell 1 và Cell 9a được truyền tường minh vào CLI;
+khác tỷ lệ vượt sai số tối đa 1 pixel chiều cao đích vẫn báo lỗi.
 Upsampling không phục hồi chi tiết đã mất. Phải kiểm tra overlay riêng mẫu này.
-Nếu dataset của bạn không cần ngoại lệ, đặt GTA_UPSAMPLE_IMAGE_IDS = [].
+Nếu dataset của bạn không cần ngoại lệ, đặt cả hai danh sách thủ công ở Cell 1 = [];
+audit vẫn kiểm tra đầy đủ và trả danh sách phát hiện thực tế.
 Khi resume, giữ đúng danh sách đã dùng để tạo manifest của checkpoint.
 
 Full scan toàn bộ GTA ảnh/nhãn có thể mất thời gian. Lỗi ID khác 34 vẫn phải kiểm tra,
@@ -600,8 +682,14 @@ biến bắt đầu bằng `_` chỉ có phạm vi trong cell khai báo nó.
 
 ```python
 _alignment_args = []
-for _id in GTA_UPSAMPLE_IMAGE_IDS:
+_requested_ids = sorted(set(GTA_UPSAMPLE_IMAGE_IDS) | set(GTA_DETECTED_UPSAMPLE_IDS))
+for _id in _requested_ids:
     _alignment_args += ["--gta-upsample-image-id", _id]
+print("Explicit RGB upsample IDs:", _requested_ids)
+_resize_ids = sorted(set(GTA_RESIZE_IMAGE_IDS) | set(GTA_DETECTED_RESIZE_IDS))
+for _id in _resize_ids:
+    _alignment_args += ["--gta-resize-image-id", _id]
+print("Explicit same-aspect RGB resize IDs:", _resize_ids)
 run_crisp(
     "make-manifests", "--data-root", DATA,
     "--gta-encoding", "raw_ids", "--city-encoding", "raw_ids",
@@ -643,10 +731,12 @@ for _split in ("source_train", "source_dev"):
         if _row.get("image_alignment"):
             _aligned_rows.append(_row)
 if _aligned_rows:
-    _preview = WORK / "aligned-source-preview.jsonl"
-    _preview.write_text("".join(json.dumps(_row) + "\n" for _row in _aligned_rows))
-    run_crisp("inspect-data", "--data-root", DATA, "--manifest", _preview,
-              "--output", WORK / "inspection/aligned_source")
+    for _offset in range(0, len(_aligned_rows), 8):
+        _batch_name = f"batch_{_offset//8:03d}"
+        _preview = WORK / f"aligned-source-preview-{_batch_name}.jsonl"
+        _preview.write_text("".join(json.dumps(_row) + "\n" for _row in _aligned_rows[_offset:_offset+8]))
+        run_crisp("inspect-data", "--data-root", DATA, "--manifest", _preview,
+                  "--output", WORK / "inspection/aligned_source" / _batch_name)
     print("Các mẫu RGB đã alignment:", [_row["sample_id"] for _row in _aligned_rows])
 for _split in ("source_train", "target_val"):
     run_crisp(
@@ -663,8 +753,11 @@ import marimo as mo
 
 mo.vstack([
     mo.image(src=str(_p), caption=str(_p.relative_to(WORK)))
-    for _split in ("source_train", "target_val", "aligned_source")
+    for _split in ("source_train", "target_val")
     for _p in sorted((WORK / "inspection" / _split).glob("sample_*.png"))[:4]
+] + [
+    mo.image(src=str(_p), caption=str(_p.relative_to(WORK)))
+    for _p in sorted((WORK / "inspection/aligned_source").rglob("sample_*.png"))
 ])
 ```
 
@@ -847,6 +940,7 @@ _freeze = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=
 (RUN_DIR / "requirements.runtime.txt").write_text(_freeze, encoding="utf-8")
 shutil.copy2(CONFIG_PATH, RUN_DIR / "run_config.yaml")
 shutil.copy2(PROVENANCE_PATH, RUN_DIR / "dataset_provenance.json")
+shutil.copy2(DATA / "gta_dimension_audit.json", RUN_DIR / "gta_dimension_audit.json")
 _commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
 assert _commit == GIT_REF
 (RUN_DIR / "run_notes.json").write_text(json.dumps({
@@ -986,7 +1080,7 @@ Không chỉ lưu chúng trong một biến Python. Trên Drive, mở thư mục
 2. Cell 1: MODE=resume, cùng RUN_ID/GIT_REF, điền snapshot và SHA256 đã xác minh.
 3. Cài package, kiểm tra GPU; kết nối lại Drive. Test quyền đọc/ghi.
 4. Khôi phục snapshot (cell 7); tải/giải nén data phần 01–10 và Cityscapes val.
-5. Regenerate manifest, so hash với bản backup; kiểm tra overlay/mapping.
+5. Chạy Cell 9a, regenerate manifest, so hash với bản backup; kiểm tra overlay/mapping.
 6. Tải encoder cache nếu thiếu; cell 14 dùng nguyên saved config và kiểm tra
    dependency versions. Không sửa budget/precision/crop/augmentation để resume.
 7. Cell 16: trainer tự dùng `--resume last.pt`; chạy đến budget đã định.

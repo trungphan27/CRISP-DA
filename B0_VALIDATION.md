@@ -1,5 +1,12 @@
 # Trạng thái kiểm chứng B0
 
+**Cập nhật 20/10/2026 — GTA 20801:** hỗ trợ opt-in từng ID bằng
+`--gta-resize-image-id`, resize RGB về kích thước nhãn khi cùng tỷ lệ khung hình
+trong sai số tối đa 1 pixel chiều cao đích. Kiểm thử kích thước thực tế
+1914×1046 → 1276×697, giữ nguyên bytes RGB/mask gốc, inspect và dataset thống
+nhất; mặc định vẫn báo mismatch, sai tỷ lệ và ID không tồn tại bị từ chối.
+Toàn bộ **24 tests đạt** trên local; chưa kiểm chứng overlay của dữ liệu thật.
+
 **GTA RGB alignment (19/10/2026):** trường hợp người dùng quan sát ở `15188`
 là RGB 957×526, mask palette 1914×1052. CLI opt-in theo ID chỉ phóng RGB đúng 2×
 bilinear khi đọc, giữ nguyên mask/PNG. Policy, sizes và hashes nằm trong manifest;

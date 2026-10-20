@@ -27,6 +27,8 @@ def main(argv=None):
     p.add_argument("--include-target-train",action="store_true",help="Optional unlabeled manifest for future B1")
     p.add_argument("--gta-upsample-image-id",action="append",default=[],metavar="ID",
                    help="Explicit GTA filename stem (e.g. 15188): upsample exactly half-size RGB to GT size; repeat per audited ID")
+    p.add_argument("--gta-resize-image-id",action="append",default=[],metavar="ID",
+                   help="Explicit audited GTA ID: resize RGB to GT size only if aspect ratio matches within 1 target-height pixel")
     p = subs.add_parser("inspect-data")
     p.add_argument("--data-root",required=True)
     p.add_argument("--manifest",required=True)
@@ -57,7 +59,8 @@ def main(argv=None):
     if args.command == "make-manifests":
         result = build_manifests(args.data_root,args.output or Path(args.data_root)/"manifests",
                                  args.gta_encoding,args.city_encoding,args.dev_fraction,args.seed,args.include_target_train,
-                                 gta_upsample_image_ids=args.gta_upsample_image_id)
+                                 gta_upsample_image_ids=args.gta_upsample_image_id,
+                                 gta_resize_image_ids=args.gta_resize_image_id)
     elif args.command == "inspect-data":
         if args.limit is not None and args.limit < 1:
             parser.error("--limit must be positive")

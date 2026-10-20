@@ -9,7 +9,7 @@ from PIL import Image
 
 from crisp_da.data.archive import extract_zip
 from crisp_da.data.inspect import inspect_manifest
-from crisp_da.data.manifest import build_manifests, load_manifest, read_rgb, resolve_data_path
+from crisp_da.data.manifest import build_manifests, load_manifest, read_rgb, resolve_data_path, same_aspect_with_rounding
 from crisp_da.data.mapping import RAW_IDS, map_labels
 from crisp_da.data.sampler import StatefulBatchSampler
 from crisp_da.data.transforms import SegmentationTransform
@@ -168,6 +168,44 @@ def test_half_size_rgb_alignment_rejects_wrong_id_and_other_ratios(fixture_confi
     wrong.save(path)
     with pytest.raises(ValueError, match="size mismatch"):
         build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["00000"])
+
+
+def test_explicit_same_aspect_rgb_downsample_with_rounding(fixture_config):
+    root = Path(fixture_config["paths"]["data_root"])
+    image_path, label_path = root/"gta/images/00000.png", root/"gta/labels/00000.png"
+    Image.new("RGB", (1914, 1046), (40, 80, 120)).save(image_path)
+    Image.new("P", (1276, 697), 7).save(label_path)
+    original_bytes = image_path.read_bytes(), label_path.read_bytes()
+    assert same_aspect_with_rounding((1914, 1046), (1276, 697))
+    assert not same_aspect_with_rounding((1914, 1046), (1276, 699))
+    assert not same_aspect_with_rounding((0, 1046), (1276, 697))
+    with pytest.raises(ValueError, match="size mismatch"):
+        build_manifests(root, root/"manifests", "raw_ids")
+    with pytest.raises(ValueError, match="size mismatch"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["00000"])
+    report = build_manifests(root, root/"manifests", "raw_ids", gta_resize_image_ids=["00000"])
+    assert report["gta_resize_image_ids_requested"] == ["00000"]
+    rows = load_manifest(root/"manifests/source_train.jsonl", root)
+    rows += load_manifest(root/"manifests/source_dev.jsonl", root)
+    row = next(r for r in rows if r["sample_id"] == "gta/00000")
+    assert row["image_alignment"]["policy"] == "resize_rgb_to_label_bilinear_same_aspect"
+    assert row["image_alignment"]["original_hw"] == [1046, 1914]
+    assert read_rgb(root, row).size == (1276, 697)
+    preview = root/"downsample-preview.jsonl"
+    preview.write_text(json.dumps(row)+"\n")
+    assert inspect_manifest(root, preview, root/"downsample-inspect")["inspected"] == 1
+    datasets, _ = make_datasets(fixture_config)
+    dataset = next(ds for ds in datasets.values() if any(r["sample_id"] == row["sample_id"] for r in ds.rows))
+    index = next(i for i, r in enumerate(dataset.rows) if r["sample_id"] == row["sample_id"])
+    assert dataset[index]["original_hw"] == (697, 1276)
+    assert original_bytes == (image_path.read_bytes(), label_path.read_bytes())
+    with pytest.raises(ValueError, match="one RGB alignment policy"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_upsample_image_ids=["00000"], gta_resize_image_ids=["00000"])
+    with pytest.raises(ValueError, match="Unknown GTA resize IDs"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_resize_image_ids=["20801"])
+    Image.new("P", (1276, 699), 7).save(label_path)
+    with pytest.raises(ValueError, match="size mismatch"):
+        build_manifests(root, root/"manifests", "raw_ids", gta_resize_image_ids=["00000"])
 
 
 def test_sampler_cursor_ignores_prefetch():

@@ -126,7 +126,7 @@ Giữ strict validation ở Cell 10. Nếu sau này quyết định sửa annota
 loại cặp lỗi, phải có policy/provenance tường minh, tạo lại manifest và tạo run
 mới. Checkpoint đã gắn với manifest cũ không thể resume trên split đã thay đổi.
 
-## Trường hợp 15188: RGB 957×526, label P 1914×1052
+## Trường hợp 15188 và 17705: RGB 957×526, label P 1914×1052
 
 Người dùng đã quan sát RGB đúng nửa kích thước mask theo cả hai chiều. Mode P
 là palette-index mask, được đọc trực tiếp thành IDs; không convert label sang
@@ -135,13 +135,29 @@ RGB. Giải pháp hỗ trợ là **opt-in cho từng ID**: phóng RGB bằng bil
 tỉ lệ kích thước không tự chứng minh hai ảnh cùng geometry. Upsampling không
 khôi phục chi tiết đã mất do ảnh RGB được lưu ở độ phân giải thấp.
 
+## Trường hợp 20801: RGB 1914×1046, label 1276×697
+
+Đây không phải RGB half-size. Scale theo chiều rộng là `1276 / 1914 = 2/3`;
+chiều cao theo cùng scale là `1046 × 2/3 = 697.333`, chênh nhãn khoảng 0.333 pixel.
+Kích thước phù hợp với giả thuyết đổi độ phân giải có làm tròn, nhưng chưa chứng
+minh ảnh và nhãn cùng nội dung/hình học. Đối chiếu ZIP và xem overlay trước khi train.
+
+Tùy chọn mới `--gta-resize-image-id 20801` chỉ cho ID được chỉ định, chỉ GTA:
+resize **RGB** bilinear về đúng kích thước nhãn 1276×697 khi đọc, giữ nguyên mask
+và PNG gốc. Điều kiện kích thước là
+`abs(image_height * label_width / image_width - label_height) <= 1` pixel.
+Sai số này được ghi trong metadata policy; loader/inspect kiểm tra lại dimensions
+và SHA256 hai input. Không convert palette mask sang RGB hoặc nội suy mask bilinear.
+
+## Cập nhật code và chạy lại manifest
+
 Trên local, commit/push code mới (gồm data/manifest.py, dataset.py, inspect.py,
 cli.py và tests) cùng các thay đổi epoch logging nếu chưa push:
 
 ```bash
 cd /f/CRISP_DA
 git add src/crisp_da configs tests README_B0.md B0_VALIDATION.md EPOCH_EVAL_LOGGING.md GTA_SIZE_MISMATCH_DIAGNOSTIC.md MOLAB_B0_GTA_01_03_RUNBOOK.md MOLAB_B0_GTA_01_10_RUNBOOK.md
-git commit -m "Support explicit half-size GTA RGB alignment"
+git commit -m "Support audited GTA RGB alignment with rounding"
 git push origin main
 ```
 
@@ -157,21 +173,35 @@ run_crisp(
     "--gta-encoding", "raw_ids", "--city-encoding", "raw_ids",
     "--dev-fraction", "0.05", "--seed", "42",
     "--gta-upsample-image-id", "15188",
+    "--gta-upsample-image-id", "17705",
+    "--gta-resize-image-id", "20801",
 )
 ```
 
 Cell 10 của runbook full đã dùng danh sách public GTA_UPSAMPLE_IMAGE_IDS từ Cell 1.
-Với dataset này danh sách ban đầu là `["15188"]`; muốn xử lý thêm ID phải chẩn
-đoán rồi thêm rõ tên. Không tự áp dụng cho mọi mismatch. Chỉ tỷ lệ label=2×RGB
-được chấp nhận, chỉ GTA. Cityscapes vẫn strict. Unknown ID hoặc tỷ lệ khác gây lỗi.
+Danh sách đã biết là `["15188", "17705"]`. **Chạy Cell 9a mới** để quét header
+toàn GTA, lấy GTA_DETECTED_UPSAMPLE_IDS, rồi Cell 10 hợp nhất hai danh sách và
+truyền từng ID vào CLI. Như vậy không phải đợi full decode dừng ở từng ID mới.
+Report ghi ở DATA/gta_dimension_audit.json, được sao vào RUN_DIR khi chuẩn bị
+train để đi cùng snapshot. Cell này không sửa hay xóa ảnh. Ngoài half-size,
+Cell 9a mới gom GTA_DETECTED_RESIZE_IDS cho các cặp cùng tỷ lệ khung hình với
+sai số làm tròn tối đa 1 pixel chiều cao đích. Cell 10 truyền danh sách này vào
+--gta-resize-image-id. Tỷ lệ khác vượt ngưỡng/header lỗi vẫn chặn; Cityscapes vẫn strict.
+
+**Trường hợp 20801 cần core code mới có --gta-resize-image-id**, không thể chỉ thêm
+20801 vào danh sách upsample cũ. Commit/push, thay Cell 1–2 và chạy lại để checkout
+code mới; sau đó thay/chạy Cell 9a–10. Không cần tải/giải nén lại dữ liệu đã có.
+Không định nghĩa lại các biến public của Cell 1 trong cell mới; danh sách phát
+hiện dùng public variables riêng do Cell 9a tạo.
 
 Mỗi row ngoại lệ trong JSONL có `image_alignment` với policy, original/target
 dimensions và SHA256 cả ảnh/nhãn. `report.json` liệt kê `image_alignments`.
 Loader/inspect áp dụng cùng một policy và từ chối khi bytes input đã thay đổi.
 Không bỏ ảnh, không sửa archive, không làm thay đổi palette indices trong mask.
 
-Cell 11 mới xuất thêm overlay vào `inspection/aligned_source/`, kể cả khi ID
-ngoại lệ không nằm trong 8 ảnh đầu của source train. Xem overlay riêng `15188`
+Cell 11 mới chia nhóm tối đa 8 ngoại lệ để xuất tất cả overlay vào
+`inspection/aligned_source/batch_*/`, kể cả khi ID không nằm trong 8 ảnh đầu
+của source train. Xem overlay riêng các mẫu `15188`, `17705`, `20801` và ID phát hiện thêm
 rồi mới xác nhận MAPPING_VERIFIED=True. Snapshot lưu cả manifest có policy.
 
 Manifest cũ không có policy không tự đổi hành vi. Nếu đã có checkpoint, không

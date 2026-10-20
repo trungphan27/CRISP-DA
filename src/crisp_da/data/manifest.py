@@ -10,6 +10,20 @@ from crisp_da.data.mapping import CLASS_NAMES, RAW_IDS, RAW_TO_TRAIN, map_labels
 from crisp_da.utils import sha256, write_json
 
 HALF_SIZE_RGB_POLICY = "upsample_half_size_rgb_to_label_bilinear"
+SAME_ASPECT_RGB_POLICY = "resize_rgb_to_label_bilinear_same_aspect"
+
+
+def same_aspect_with_rounding(image_wh, label_wh):
+    """Isotropic scaling by width, allowing <=1 pixel rounding in target height.
+
+    This checks dimensions only; semantic/geometric correspondence still needs
+    visual inspection before opting in for a particular GTA sample ID.
+    """
+    width, height = image_wh
+    target_width, target_height = label_wh
+    return min(width, height, target_width, target_height) > 0 and abs(
+        height*target_width - target_height*width
+    ) <= width
 
 
 def resolve_data_path(root, relative):
@@ -32,10 +46,16 @@ def read_rgb(root, row):
     if alignment:
         original = alignment["original_hw"]
         target = alignment["target_hw"]
-        if (row["dataset"] != "gta" or alignment["policy"] != HALF_SIZE_RGB_POLICY
+        policy = alignment["policy"]
+        policy_valid = (
+            (policy == HALF_SIZE_RGB_POLICY and target == [2*rgb.height, 2*rgb.width])
+            or (policy == SAME_ASPECT_RGB_POLICY
+                and alignment.get("max_target_height_rounding_error_px") == 1
+                and same_aspect_with_rounding(rgb.size, (row["width"], row["height"])))
+        )
+        if (row["dataset"] != "gta" or not policy_valid
                 or original != [rgb.height, rgb.width]
-                or target != [row["height"], row["width"]]
-                or target != [2*rgb.height, 2*rgb.width]):
+                or target != [row["height"], row["width"]]):
             raise ValueError(f"Invalid/changed RGB alignment: {row['sample_id']}")
         if (sha256(path) != alignment["original_image_sha256"]
                 or sha256(resolve_data_path(root, row["label_path"])) != alignment["label_sha256"]):
@@ -82,7 +102,8 @@ def index_files(folder, suffix):
     return result
 
 
-def verify_pair(root, image_path, label_path, encoding, dataset, sample_id, allow_half_size_rgb=False):
+def verify_pair(root, image_path, label_path, encoding, dataset, sample_id,
+                allow_half_size_rgb=False, allow_same_aspect_rgb=False):
     with Image.open(image_path) as image:
         image.load()
         width, height = image.size
@@ -94,12 +115,19 @@ def verify_pair(root, image_path, label_path, encoding, dataset, sample_id, allo
         with Image.open(label_path) as label:
             label.load()
             if label.size != (width, height):
+                policy = None
                 if dataset == "gta" and allow_half_size_rgb and label.size == (2*width, 2*height):
+                    policy = HALF_SIZE_RGB_POLICY
+                elif dataset == "gta" and allow_same_aspect_rgb and same_aspect_with_rounding((width, height), label.size):
+                    policy = SAME_ASPECT_RGB_POLICY
+                if policy:
                     row["image_alignment"] = {
-                        "policy":HALF_SIZE_RGB_POLICY, "original_hw":[height, width],
+                        "policy":policy, "original_hw":[height, width],
                         "target_hw":[label.height, label.width],
                         "original_image_sha256":sha256(image_path), "label_sha256":sha256(label_path),
                     }
+                    if policy == SAME_ASPECT_RGB_POLICY:
+                        row["image_alignment"]["max_target_height_rounding_error_px"] = 1
                     row.update(height=label.height, width=label.width)
                 else:
                     raise ValueError(
@@ -114,14 +142,15 @@ def verify_pair(root, image_path, label_path, encoding, dataset, sample_id, allo
     return row, histogram
 
 
-def paired_rows(root, images, labels, encoding, dataset, half_size_rgb_ids=()):
+def paired_rows(root, images, labels, encoding, dataset, half_size_rgb_ids=(), same_aspect_rgb_ids=()):
     if labels is not None and images.keys() != labels.keys():
         raise ValueError(f"Pair mismatch: missing labels={sorted(images.keys()-labels.keys())[:10]}, "
                          f"extra labels={sorted(labels.keys()-images.keys())[:10]}")
     rows, histogram = [], np.zeros(19, dtype=np.int64)
     for key in sorted(images):
         row, counts = verify_pair(root, images[key], labels[key] if labels else None,
-                                  encoding, dataset, f"{dataset}/{key}", key in half_size_rgb_ids)
+                                  encoding, dataset, f"{dataset}/{key}", key in half_size_rgb_ids,
+                                  key in same_aspect_rgb_ids)
         rows.append(row)
         histogram += counts
     return rows, histogram.tolist()
@@ -136,7 +165,7 @@ def save_rows(path, rows, split):
 
 
 def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fraction=0.05,
-                    seed=42, include_target_train=False, gta_upsample_image_ids=None):
+                    seed=42, include_target_train=False, gta_upsample_image_ids=None, gta_resize_image_ids=None):
     root, output = Path(root).resolve(), Path(output).resolve()
     if not 0 < dev_fraction < 1:
         raise ValueError("dev_fraction must be between 0 and 1")
@@ -144,8 +173,13 @@ def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fra
     upsample_ids = set(gta_upsample_image_ids or ())
     if upsample_ids - gta_images.keys():
         raise ValueError(f"Unknown GTA upsample IDs: {sorted(upsample_ids-gta_images.keys())}")
+    resize_ids = set(gta_resize_image_ids or ())
+    if resize_ids - gta_images.keys():
+        raise ValueError(f"Unknown GTA resize IDs: {sorted(resize_ids-gta_images.keys())}")
+    if upsample_ids & resize_ids:
+        raise ValueError("Use only one RGB alignment policy per GTA sample ID")
     source, gta_hist = paired_rows(root, gta_images,
-                                   index_files(root/"gta/labels", ".png"), gta_encoding, "gta", upsample_ids)
+                                   index_files(root/"gta/labels", ".png"), gta_encoding, "gta", upsample_ids, resize_ids)
     if len(source) < 2:
         raise ValueError("Need at least 2 GTA images for disjoint train/dev splits")
     shuffled = list(source)
@@ -159,6 +193,7 @@ def build_manifests(root, output, gta_encoding, city_encoding="raw_ids", dev_fra
               "mapping": RAW_TO_TRAIN, "gta_encoding": gta_encoding, "city_encoding": city_encoding,
               "gta_extra_raw_ignore_ids": [34],
               "gta_upsample_image_ids_requested":sorted(upsample_ids),
+              "gta_resize_image_ids_requested":sorted(resize_ids),
               "image_alignments":[{"sample_id":r["sample_id"], "image_path":r["image_path"],
                                    "label_path":r["label_path"], **r["image_alignment"]}
                                   for r in source if r.get("image_alignment")],

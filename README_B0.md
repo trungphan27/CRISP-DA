@@ -3,7 +3,10 @@
 GTA RGB half-size: CLI `make-manifests --gta-upsample-image-id 15188` cho phép
 riêng RGB nhỏ đúng 1/2 nhãn ở ID đã kiểm tra được upsample bilinear khi đọc.
 Mask/PNG gốc giữ nguyên; manifest ghi policy, dimensions và SHA256 để inspect
-và loader áp dụng nhất quán. Mismatch khác vẫn lỗi. Xem
+và loader áp dụng nhất quán. Với RGB/nhãn cùng tỷ lệ khung hình trong sai số làm
+tròn tối đa 1 pixel chiều cao đích, dùng `--gta-resize-image-id 20801` cho từng ID
+đã kiểm tra: RGB được resize bilinear về kích thước nhãn, mask giữ nguyên.
+Mismatch không được chỉ định hoặc khác tỷ lệ vượt ngưỡng vẫn lỗi. Xem
 [chẩn đoán và cách áp dụng](GTA_SIZE_MISMATCH_DIAGNOSTIC.md), rồi kiểm tra overlay.
 
 Evaluation theo epoch: bật `train.eval_every_epoch: true`; `eval_every: 0` chỉ
